@@ -1,177 +1,359 @@
 package api
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
+	"errors"
 	"fmt"
+	"github.com/CeruleanFlow/cerulean/internal/dao"
 	"io"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
-	"github.com/CeruleanFlow/cerulean-server/internal/domain"
-	"github.com/CeruleanFlow/cerulean-server/internal/ingest"
-	"github.com/CeruleanFlow/cerulean-server/internal/rag"
-	"github.com/CeruleanFlow/cerulean-server/internal/repository"
-	"github.com/CeruleanFlow/cerulean-server/internal/storage"
-	jsonhttp "github.com/CeruleanFlow/cerulean-server/pkg/httputil"
+	"github.com/CeruleanFlow/cerulean/internal/domain"
+	"github.com/CeruleanFlow/cerulean/internal/ingest"
+	"github.com/CeruleanFlow/cerulean/internal/rag"
+	"github.com/CeruleanFlow/cerulean/internal/repository"
+	"github.com/CeruleanFlow/cerulean/internal/storage"
+	"github.com/CeruleanFlow/cerulean/internal/task"
+	"github.com/gin-gonic/gin"
 )
 
 type Handler struct {
 	papers repository.PaperRepository
+	chunks repository.ChunkRepository
+	tasks  task.Manager
 	store  storage.ObjectStorage
 	ingest *ingest.Service
 	rag    *rag.Service
+	users  *dao.UserDAO
 }
 
 func NewHandler(opts RouterOptions) *Handler {
 	return &Handler{
 		papers: opts.PaperRepo,
+		chunks: opts.ChunkRepo,
+		users:  opts.UserDAO,
+		tasks:  opts.TaskManager,
 		store:  opts.ObjectStore,
 		ingest: opts.IngestService,
 		rag:    opts.RAGService,
 	}
 }
 
-func (h *Handler) Health(w http.ResponseWriter, r *http.Request) {
-	jsonhttp.WriteJSON(w, http.StatusOK, map[string]any{"status": "ok", "service": "cerulean-server"})
+func (h *Handler) Health(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{
+		"status":  "ok",
+		"service": "cerulean-server",
+	})
 }
 
-func (h *Handler) UploadPaper(w http.ResponseWriter, r *http.Request) {
-	if err := r.ParseMultipartForm(128 << 20); err != nil {
-		jsonhttp.WriteError(w, http.StatusBadRequest, err)
+func (h *Handler) UploadPaper(c *gin.Context) {
+	header, err := c.FormFile("file")
+	if err != nil {
+		writeError(c, http.StatusBadRequest, fmt.Errorf("multipart field 'file' is required: %w", err))
 		return
 	}
-	file, header, err := r.FormFile("file")
+
+	ext := strings.ToLower(filepath.Ext(header.Filename))
+	if ext != ".pdf" {
+		writeError(c, http.StatusBadRequest, fmt.Errorf("only PDF upload is supported in the current paper-RAG MVP"))
+		return
+	}
+
+	file, err := header.Open()
 	if err != nil {
-		jsonhttp.WriteError(w, http.StatusBadRequest, fmt.Errorf("multipart field 'file' is required: %w", err))
+		writeError(c, http.StatusBadRequest, err)
 		return
 	}
 	defer file.Close()
 
-	tmp, err := io.ReadAll(file)
-	if err != nil {
-		jsonhttp.WriteError(w, http.StatusInternalServerError, err)
+	if err := os.MkdirAll(".var/tmp", 0o755); err != nil {
+		writeError(c, http.StatusInternalServerError, err)
 		return
 	}
-	sum := sha256.Sum256(tmp)
-	digest := hex.EncodeToString(sum[:])
-	paperID := "paper_" + digest[:16]
-	ext := strings.ToLower(filepath.Ext(header.Filename))
-	if ext == "" {
-		ext = ".pdf"
+
+	tmp, err := os.CreateTemp(".var/tmp", "upload-*.pdf")
+	if err != nil {
+		writeError(c, http.StatusInternalServerError, err)
+		return
 	}
-	objectKey := fmt.Sprintf("papers/%s/original%s", paperID, ext)
+
+	defer func() {
+		_ = tmp.Close()
+		_ = os.Remove(tmp.Name())
+	}()
+
+	hasher := sha256.New()
+	size, err := io.Copy(io.MultiWriter(tmp, hasher), file)
+	if err != nil {
+		writeError(c, http.StatusInternalServerError, err)
+		return
+	}
+
+	if size == 0 {
+		writeError(c, http.StatusBadRequest, fmt.Errorf("empty file"))
+		return
+	}
+
+	digest := hex.EncodeToString(hasher.Sum(nil))
+
+	if existing, err := h.papers.FindBySHA256(c.Request.Context(), digest); err == nil {
+		c.JSON(http.StatusOK, existing)
+		return
+	} else if !errors.Is(err, repository.ErrNotFound) {
+		writeError(c, http.StatusInternalServerError, err)
+		return
+	}
+
+	paperID := "paper_" + digest[:16]
+	objectKey := fmt.Sprintf("papers/%s/original.pdf", paperID)
+
 	contentType := header.Header.Get("Content-Type")
-	if contentType == "" {
+	if contentType == "" || contentType == "application/octet-stream" {
 		contentType = "application/pdf"
 	}
 
-	if _, err := h.store.Put(r.Context(), objectKey, bytes.NewReader(tmp), int64(len(tmp)), storage.PutOptions{ContentType: contentType}); err != nil {
-		jsonhttp.WriteError(w, http.StatusInternalServerError, err)
+	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
+		writeError(c, http.StatusInternalServerError, err)
 		return
 	}
+
+	_, err = h.store.Put(
+		c.Request.Context(),
+		objectKey,
+		tmp,
+		size,
+		storage.PutOptions{
+			ContentType: contentType,
+			Metadata: map[string]string{
+				"sha256":   digest,
+				"filename": header.Filename,
+			},
+		},
+	)
+	if err != nil {
+		writeError(c, http.StatusInternalServerError, err)
+		return
+	}
+
 	now := time.Now()
 	paper := domain.Paper{
 		ID:          paperID,
 		Title:       strings.TrimSuffix(header.Filename, filepath.Ext(header.Filename)),
 		Filename:    header.Filename,
 		ContentType: contentType,
-		Size:        int64(len(tmp)),
+		Size:        size,
 		SHA256:      digest,
 		ObjectKey:   objectKey,
 		Status:      domain.PaperUploaded,
 		CreatedAt:   now,
 		UpdatedAt:   now,
 	}
-	if err := h.papers.Create(r.Context(), paper); err != nil {
-		jsonhttp.WriteError(w, http.StatusInternalServerError, err)
+
+	if err := h.papers.Create(c.Request.Context(), paper); err != nil {
+		writeError(c, http.StatusInternalServerError, err)
 		return
 	}
-	jsonhttp.WriteJSON(w, http.StatusCreated, paper)
+
+	c.JSON(http.StatusCreated, paper)
 }
 
-func (h *Handler) ListPapers(w http.ResponseWriter, r *http.Request) {
-	papers, err := h.papers.List(r.Context())
+func (h *Handler) ListPapers(c *gin.Context) {
+	papers, err := h.papers.List(c.Request.Context())
 	if err != nil {
-		jsonhttp.WriteError(w, http.StatusInternalServerError, err)
+		writeError(c, http.StatusInternalServerError, err)
 		return
 	}
-	jsonhttp.WriteJSON(w, http.StatusOK, map[string]any{"items": papers})
+
+	c.JSON(http.StatusOK, gin.H{
+		"items": papers,
+	})
 }
 
-func (h *Handler) GetPaper(w http.ResponseWriter, r *http.Request) {
-	id, action := parsePaperPath(r.URL.Path)
-	if id == "" || action != "" {
-		jsonhttp.WriteError(w, http.StatusNotFound, fmt.Errorf("paper not found"))
-		return
-	}
-	paper, err := h.papers.Get(r.Context(), id)
+func (h *Handler) GetPaper(c *gin.Context) {
+	id := c.Param("id")
+
+	paper, err := h.papers.Get(c.Request.Context(), id)
 	if err != nil {
-		jsonhttp.WriteError(w, http.StatusNotFound, err)
+		writeError(c, http.StatusNotFound, err)
 		return
 	}
-	jsonhttp.WriteJSON(w, http.StatusOK, paper)
+
+	c.JSON(http.StatusOK, paper)
 }
 
-func (h *Handler) PaperAction(w http.ResponseWriter, r *http.Request) {
-	id, action := parsePaperPath(r.URL.Path)
-	if id == "" || action == "" {
-		jsonhttp.WriteError(w, http.StatusNotFound, fmt.Errorf("paper action not found"))
+func (h *Handler) DownloadPaper(c *gin.Context) {
+	id := c.Param("id")
+
+	paper, err := h.papers.Get(c.Request.Context(), id)
+	if err != nil {
+		writeError(c, http.StatusNotFound, err)
 		return
 	}
-	switch action {
-	case "ingest":
-		job, err := h.ingest.StartPaperIngest(r.Context(), id)
-		if err != nil {
-			jsonhttp.WriteError(w, http.StatusNotFound, err)
-			return
-		}
-		jsonhttp.WriteJSON(w, http.StatusAccepted, job)
-	default:
-		jsonhttp.WriteError(w, http.StatusNotFound, fmt.Errorf("unknown paper action: %s", action))
+
+	reader, info, err := h.store.Get(c.Request.Context(), paper.ObjectKey)
+	if err != nil {
+		writeError(c, http.StatusNotFound, err)
+		return
 	}
+	defer reader.Close()
+
+	contentType := paper.ContentType
+	if contentType == "" {
+		contentType = info.ContentType
+	}
+	if contentType == "" {
+		contentType = "application/pdf"
+	}
+
+	c.Header("Content-Type", contentType)
+	c.Header("Content-Disposition", fmt.Sprintf("inline; filename=%q", paper.Filename))
+
+	if paper.Size > 0 {
+		c.Header("Content-Length", fmt.Sprintf("%d", paper.Size))
+	}
+
+	_, _ = io.Copy(c.Writer, reader)
 }
 
-func (h *Handler) Search(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) ListPaperChunks(c *gin.Context) {
+	id := c.Param("id")
+
+	if _, err := h.papers.Get(c.Request.Context(), id); err != nil {
+		writeError(c, http.StatusNotFound, err)
+		return
+	}
+
+	chunks, err := h.chunks.ListByPaperID(c.Request.Context(), id)
+	if err != nil {
+		writeError(c, http.StatusInternalServerError, err)
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"items": chunks,
+	})
+}
+
+func (h *Handler) StartPaperIngest(c *gin.Context) {
+	id := c.Param("id")
+
+	job, err := h.ingest.StartPaperIngest(c.Request.Context(), id)
+	if err != nil {
+		writeError(c, http.StatusNotFound, err)
+		return
+	}
+
+	c.JSON(http.StatusAccepted, job)
+}
+
+func (h *Handler) GetTask(c *gin.Context) {
+	id := c.Param("id")
+
+	job, ok := h.tasks.Get(c.Request.Context(), id)
+	if !ok {
+		writeError(c, http.StatusNotFound, fmt.Errorf("task not found"))
+		return
+	}
+
+	c.JSON(http.StatusOK, job)
+}
+
+func (h *Handler) Search(c *gin.Context) {
 	var req domain.SearchRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		jsonhttp.WriteError(w, http.StatusBadRequest, err)
+	if err := c.ShouldBindJSON(&req); err != nil {
+		writeError(c, http.StatusBadRequest, err)
 		return
 	}
-	resp, err := h.rag.Search(r.Context(), req)
+
+	resp, err := h.rag.Search(c.Request.Context(), req)
 	if err != nil {
-		jsonhttp.WriteError(w, http.StatusInternalServerError, err)
+		writeError(c, http.StatusInternalServerError, err)
 		return
 	}
-	jsonhttp.WriteJSON(w, http.StatusOK, resp)
+
+	c.JSON(http.StatusOK, resp)
 }
 
-func (h *Handler) Chat(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) Chat(c *gin.Context) {
 	var req domain.ChatRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		jsonhttp.WriteError(w, http.StatusBadRequest, err)
+	if err := c.ShouldBindJSON(&req); err != nil {
+		writeError(c, http.StatusBadRequest, err)
 		return
 	}
-	resp, err := h.rag.Chat(r.Context(), req)
+
+	resp, err := h.rag.Chat(c.Request.Context(), req)
 	if err != nil {
-		jsonhttp.WriteError(w, http.StatusInternalServerError, err)
+		writeError(c, http.StatusInternalServerError, err)
 		return
 	}
-	jsonhttp.WriteJSON(w, http.StatusOK, resp)
+
+	c.JSON(http.StatusOK, resp)
 }
 
-func parsePaperPath(path string) (id string, action string) {
-	trimmed := strings.TrimPrefix(path, "/api/v1/papers/")
-	parts := strings.Split(strings.Trim(trimmed, "/"), "/")
-	if len(parts) >= 1 {
-		id = parts[0]
+func writeError(c *gin.Context, status int, err error) {
+	c.JSON(status, gin.H{
+		"error": err.Error(),
+	})
+}
+
+func (h *Handler) GetDeepSeekSettings(c *gin.Context) {
+	if h.users == nil {
+		writeError(c, http.StatusInternalServerError, fmt.Errorf("user dao is not initialized"))
+		return
 	}
-	if len(parts) >= 2 {
-		action = parts[1]
+
+	user, err := h.users.GetDefault(c.Request.Context())
+	if err != nil {
+		writeError(c, http.StatusInternalServerError, err)
+		return
 	}
-	return id, action
+
+	c.JSON(http.StatusOK, gin.H{
+		"user_id":           user.ID,
+		"deepseek_base_url": user.DeepSeekBaseURL,
+		"deepseek_model":    user.DeepSeekModel,
+		"has_api_key":       user.DeepSeekAPIKey != "",
+	})
+}
+
+type updateDeepSeekSettingsRequest struct {
+	APIKey  string `json:"api_key"`
+	BaseURL string `json:"base_url"`
+	Model   string `json:"model"`
+}
+
+func (h *Handler) UpdateDeepSeekSettings(c *gin.Context) {
+	if h.users == nil {
+		writeError(c, http.StatusInternalServerError, fmt.Errorf("user dao is not initialized"))
+		return
+	}
+
+	var req updateDeepSeekSettingsRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		writeError(c, http.StatusBadRequest, err)
+		return
+	}
+
+	user, err := h.users.UpdateDeepSeekConfig(
+		c.Request.Context(),
+		req.APIKey,
+		req.BaseURL,
+		req.Model,
+	)
+	if err != nil {
+		writeError(c, http.StatusInternalServerError, err)
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"user_id":           user.ID,
+		"deepseek_base_url": user.DeepSeekBaseURL,
+		"deepseek_model":    user.DeepSeekModel,
+		"has_api_key":       user.DeepSeekAPIKey != "",
+	})
 }

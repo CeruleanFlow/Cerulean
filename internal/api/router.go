@@ -1,40 +1,62 @@
 package api
 
 import (
+	"github.com/CeruleanFlow/cerulean/internal/dao"
 	"net/http"
 	"strings"
 
-	"github.com/CeruleanFlow/cerulean-server/internal/config"
-	"github.com/CeruleanFlow/cerulean-server/internal/ingest"
-	"github.com/CeruleanFlow/cerulean-server/internal/rag"
-	"github.com/CeruleanFlow/cerulean-server/internal/repository"
-	"github.com/CeruleanFlow/cerulean-server/internal/storage"
+	"github.com/CeruleanFlow/cerulean/internal/config"
+	"github.com/CeruleanFlow/cerulean/internal/ingest"
+	"github.com/CeruleanFlow/cerulean/internal/rag"
+	"github.com/CeruleanFlow/cerulean/internal/repository"
+	"github.com/CeruleanFlow/cerulean/internal/storage"
+	"github.com/CeruleanFlow/cerulean/internal/task"
+	"github.com/gin-gonic/gin"
 )
 
 type RouterOptions struct {
 	Config        config.Config
 	PaperRepo     repository.PaperRepository
+	ChunkRepo     repository.ChunkRepository
+	UserDAO       *dao.UserDAO
+	TaskManager   task.Manager
 	ObjectStore   storage.ObjectStorage
 	IngestService *ingest.Service
 	RAGService    *rag.Service
 }
 
 func NewRouter(opts RouterOptions) http.Handler {
-	mux := http.NewServeMux()
+	router := gin.New()
+	router.Use(gin.Logger())
+	router.Use(gin.Recovery())
+	router.Use(cors(opts.Config.CORSOrigins))
+
 	h := NewHandler(opts)
 
-	mux.HandleFunc("GET /api/v1/health", h.Health)
-	mux.HandleFunc("POST /api/v1/papers", h.UploadPaper)
-	mux.HandleFunc("GET /api/v1/papers", h.ListPapers)
-	mux.HandleFunc("GET /api/v1/papers/", h.GetPaper)
-	mux.HandleFunc("POST /api/v1/papers/", h.PaperAction)
-	mux.HandleFunc("POST /api/v1/search", h.Search)
-	mux.HandleFunc("POST /api/v1/chat", h.Chat)
+	v1 := router.Group("/api/v1")
+	{
+		v1.GET("/health", h.Health)
 
-	return cors(opts.Config.CORSOrigins, mux)
+		v1.GET("/settings/deepseek", h.GetDeepSeekSettings)
+		v1.PUT("/settings/deepseek", h.UpdateDeepSeekSettings)
+
+		v1.POST("/papers", h.UploadPaper)
+		v1.GET("/papers", h.ListPapers)
+		v1.GET("/papers/:id", h.GetPaper)
+		v1.GET("/papers/:id/download", h.DownloadPaper)
+		v1.GET("/papers/:id/chunks", h.ListPaperChunks)
+		v1.POST("/papers/:id/ingest", h.StartPaperIngest)
+
+		v1.GET("/tasks/:id", h.GetTask)
+
+		v1.POST("/search", h.Search)
+		v1.POST("/chat", h.Chat)
+	}
+
+	return router
 }
 
-func cors(origins string, next http.Handler) http.Handler {
+func cors(origins string) gin.HandlerFunc {
 	allowed := map[string]bool{}
 	for _, origin := range strings.Split(origins, ",") {
 		origin = strings.TrimSpace(origin)
@@ -42,18 +64,25 @@ func cors(origins string, next http.Handler) http.Handler {
 			allowed[origin] = true
 		}
 	}
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		origin := r.Header.Get("Origin")
-		if allowed[origin] || origins == "*" {
-			w.Header().Set("Access-Control-Allow-Origin", origin)
-			w.Header().Set("Vary", "Origin")
+
+	return func(c *gin.Context) {
+		origin := c.GetHeader("Origin")
+
+		if origins == "*" {
+			c.Header("Access-Control-Allow-Origin", "*")
+		} else if allowed[origin] {
+			c.Header("Access-Control-Allow-Origin", origin)
+			c.Header("Vary", "Origin")
 		}
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-		if r.Method == http.MethodOptions {
-			w.WriteHeader(http.StatusNoContent)
+
+		c.Header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
+
+		if c.Request.Method == http.MethodOptions {
+			c.AbortWithStatus(http.StatusNoContent)
 			return
 		}
-		next.ServeHTTP(w, r)
-	})
+
+		c.Next()
+	}
 }

@@ -1,28 +1,47 @@
-# API Draft
+# Cerulean API Draft
 
-## Upload Paper
+Base path: `/api/v1`
+
+## Health
 
 ```http
-POST /api/v1/papers
-Content-Type: multipart/form-data
-
-file=<PDF>
+GET /health
 ```
 
-## Start Ingestion
+## Papers
 
 ```http
-POST /api/v1/papers/{paper_id}/ingest
+POST /papers
+Content-Type: multipart/form-data
+field: file=<paper.pdf>
+```
+
+Uploads one PDF, calculates SHA256, stores the original artifact, persists metadata, and returns a `Paper`. Duplicate SHA256 uploads return the existing `Paper`.
+
+```http
+GET /papers
+GET /papers/{paper_id}
+GET /papers/{paper_id}/download
+GET /papers/{paper_id}/chunks
+POST /papers/{paper_id}/ingest
+```
+
+`POST /ingest` currently starts an asynchronous placeholder pipeline. Later it will enqueue PaddleOCR and indexing work.
+
+## Tasks
+
+```http
+GET /tasks/{task_id}
 ```
 
 ## Search
 
 ```http
-POST /api/v1/search
+POST /search
 Content-Type: application/json
 
 {
-  "query": "what is the main contribution?",
+  "query": "what is the method?",
   "top_k": 5,
   "filters": {
     "paper_id": "paper_xxx"
@@ -33,14 +52,16 @@ Content-Type: application/json
 ## Chat
 
 ```http
-POST /api/v1/chat
+POST /chat
 Content-Type: application/json
 
 {
-  "question": "summarize the method section",
+  "question": "summarize the contributions",
   "top_k": 5,
   "filters": {
     "paper_id": "paper_xxx"
   }
 }
 ```
+
+Current chat is a placeholder answer with retrieved sources. DeepSeek will replace it after retrieval is stable.

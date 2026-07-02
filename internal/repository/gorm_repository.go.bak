@@ -1,0 +1,301 @@
+package repository
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/CeruleanFlow/cerulean/internal/domain"
+	"gorm.io/datatypes"
+	"gorm.io/driver/mysql"
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
+)
+
+type PaperModel struct {
+	ID          string `gorm:"primaryKey;size:64"`
+	Title       string `gorm:"size:512;not null"`
+	Filename    string `gorm:"size:512;not null"`
+	ContentType string `gorm:"size:128"`
+	Size        int64  `gorm:"not null"`
+	SHA256      string `gorm:"size:64;uniqueIndex;not null"`
+	ObjectKey   string `gorm:"size:1024;not null"`
+	Status      string `gorm:"size:32;index;not null"`
+	PageCount   int
+	Error       string `gorm:"type:text"`
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+}
+
+func (PaperModel) TableName() string {
+	return "papers"
+}
+
+type ChunkModel struct {
+	ID         string            `gorm:"primaryKey;size:96"`
+	PaperID    string            `gorm:"size:64;index;not null"`
+	PageNo     int               `gorm:"index"`
+	ChunkIndex int               `gorm:"column:chunk_index;index"`
+	Text       string            `gorm:"type:longtext;not null"`
+	ObjectKey  string            `gorm:"size:1024"`
+	VectorID   string            `gorm:"size:128;index"`
+	Metadata   datatypes.JSONMap `gorm:"type:json"`
+	CreatedAt  time.Time
+	UpdatedAt  time.Time
+}
+
+func (ChunkModel) TableName() string {
+	return "chunks"
+}
+
+type GORMPaperRepository struct {
+	db *gorm.DB
+}
+
+type GORMChunkRepository struct {
+	db *gorm.DB
+}
+
+func NewGORMRepositories(dsn string) (PaperRepository, ChunkRepository, error) {
+	db, err := gorm.Open(mysql.Open(dsn), &gorm.Config{})
+	if err != nil {
+		return nil, nil, err
+	}
+
+	sqlDB, err := db.DB()
+	if err != nil {
+		return nil, nil, err
+	}
+
+	sqlDB.SetMaxOpenConns(20)
+	sqlDB.SetMaxIdleConns(10)
+	sqlDB.SetConnMaxLifetime(time.Hour)
+
+	if err := db.AutoMigrate(&PaperModel{}, &ChunkModel{}); err != nil {
+		return nil, nil, err
+	}
+
+	paperRepo := &GORMPaperRepository{db: db}
+	chunkRepo := &GORMChunkRepository{db: db}
+
+	return paperRepo, chunkRepo, nil
+}
+
+func (r *GORMPaperRepository) Create(ctx context.Context, paper domain.Paper) error {
+	model := toPaperModel(paper)
+	if err := r.db.WithContext(ctx).Create(&model).Error; err != nil {
+		return err
+	}
+	return nil
+}
+
+func (r *GORMPaperRepository) Update(ctx context.Context, paper domain.Paper) error {
+	var count int64
+	if err := r.db.WithContext(ctx).
+		Model(&PaperModel{}).
+		Where("id = ?", paper.ID).
+		Count(&count).Error; err != nil {
+		return err
+	}
+	if count == 0 {
+		return ErrNotFound
+	}
+
+	model := toPaperModel(paper)
+	return r.db.WithContext(ctx).Save(&model).Error
+}
+
+func (r *GORMPaperRepository) Get(ctx context.Context, id string) (domain.Paper, error) {
+	var model PaperModel
+	if err := r.db.WithContext(ctx).First(&model, "id = ?", id).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return domain.Paper{}, ErrNotFound
+		}
+		return domain.Paper{}, err
+	}
+	return model.toDomain(), nil
+}
+
+func (r *GORMPaperRepository) FindBySHA256(ctx context.Context, sha256 string) (domain.Paper, error) {
+	var model PaperModel
+	if err := r.db.WithContext(ctx).First(&model, "sha256 = ?", sha256).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return domain.Paper{}, ErrNotFound
+		}
+		return domain.Paper{}, err
+	}
+	return model.toDomain(), nil
+}
+
+func (r *GORMPaperRepository) List(ctx context.Context) ([]domain.Paper, error) {
+	var models []PaperModel
+	if err := r.db.WithContext(ctx).
+		Order("created_at DESC").
+		Find(&models).Error; err != nil {
+		return nil, err
+	}
+
+	papers := make([]domain.Paper, 0, len(models))
+	for _, model := range models {
+		papers = append(papers, model.toDomain())
+	}
+	return papers, nil
+}
+
+func (r *GORMPaperRepository) Delete(ctx context.Context, id string) error {
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		result := tx.Delete(&PaperModel{}, "id = ?", id)
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == 0 {
+			return ErrNotFound
+		}
+
+		if err := tx.Delete(&ChunkModel{}, "paper_id = ?", id).Error; err != nil {
+			return err
+		}
+		return nil
+	})
+}
+
+func (r *GORMChunkRepository) UpsertMany(ctx context.Context, chunks []domain.Chunk) error {
+	if len(chunks) == 0 {
+		return nil
+	}
+
+	models := make([]ChunkModel, 0, len(chunks))
+	for _, chunk := range chunks {
+		models = append(models, toChunkModel(chunk))
+	}
+
+	return r.db.WithContext(ctx).
+		Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "id"}},
+			UpdateAll: true,
+		}).
+		Create(&models).Error
+}
+
+func (r *GORMChunkRepository) List(ctx context.Context, filters map[string]string) ([]domain.Chunk, error) {
+	query := r.db.WithContext(ctx).Model(&ChunkModel{})
+
+	if filters != nil {
+		if paperID := filters["paper_id"]; paperID != "" {
+			query = query.Where("paper_id = ?", paperID)
+		}
+	}
+
+	var models []ChunkModel
+	if err := query.
+		Order("paper_id ASC").
+		Order("page_no ASC").
+		Order("chunk_index ASC").
+		Find(&models).Error; err != nil {
+		return nil, err
+	}
+
+	chunks := make([]domain.Chunk, 0, len(models))
+	for _, model := range models {
+		chunks = append(chunks, model.toDomain())
+	}
+	return chunks, nil
+}
+
+func (r *GORMChunkRepository) ListByPaperID(ctx context.Context, paperID string) ([]domain.Chunk, error) {
+	return r.List(ctx, map[string]string{"paper_id": paperID})
+}
+
+func (r *GORMChunkRepository) DeleteByPaperID(ctx context.Context, paperID string) error {
+	return r.db.WithContext(ctx).Delete(&ChunkModel{}, "paper_id = ?", paperID).Error
+}
+
+func toPaperModel(paper domain.Paper) PaperModel {
+	return PaperModel{
+		ID:          paper.ID,
+		Title:       paper.Title,
+		Filename:    paper.Filename,
+		ContentType: paper.ContentType,
+		Size:        paper.Size,
+		SHA256:      paper.SHA256,
+		ObjectKey:   paper.ObjectKey,
+		Status:      string(paper.Status),
+		PageCount:   paper.PageCount,
+		Error:       paper.Error,
+		CreatedAt:   paper.CreatedAt,
+		UpdatedAt:   paper.UpdatedAt,
+	}
+}
+
+func (m PaperModel) toDomain() domain.Paper {
+	return domain.Paper{
+		ID:          m.ID,
+		Title:       m.Title,
+		Filename:    m.Filename,
+		ContentType: m.ContentType,
+		Size:        m.Size,
+		SHA256:      m.SHA256,
+		ObjectKey:   m.ObjectKey,
+		Status:      domain.PaperStatus(m.Status),
+		PageCount:   m.PageCount,
+		Error:       m.Error,
+		CreatedAt:   m.CreatedAt,
+		UpdatedAt:   m.UpdatedAt,
+	}
+}
+
+func toChunkModel(chunk domain.Chunk) ChunkModel {
+	return ChunkModel{
+		ID:         chunk.ID,
+		PaperID:    chunk.PaperID,
+		PageNo:     chunk.PageNo,
+		ChunkIndex: chunk.Index,
+		Text:       chunk.Text,
+		ObjectKey:  chunk.ObjectKey,
+		VectorID:   chunk.VectorID,
+		Metadata:   toJSONMap(chunk.Metadata),
+		CreatedAt:  chunk.CreatedAt,
+		UpdatedAt:  chunk.UpdatedAt,
+	}
+}
+
+func (m ChunkModel) toDomain() domain.Chunk {
+	return domain.Chunk{
+		ID:        m.ID,
+		PaperID:   m.PaperID,
+		PageNo:    m.PageNo,
+		Index:     m.ChunkIndex,
+		Text:      m.Text,
+		ObjectKey: m.ObjectKey,
+		VectorID:  m.VectorID,
+		Metadata:  fromJSONMap(m.Metadata),
+		CreatedAt: m.CreatedAt,
+		UpdatedAt: m.UpdatedAt,
+	}
+}
+
+func toJSONMap(values map[string]string) datatypes.JSONMap {
+	out := datatypes.JSONMap{}
+	for key, value := range values {
+		out[key] = value
+	}
+	return out
+}
+
+func fromJSONMap(values datatypes.JSONMap) map[string]string {
+	if values == nil {
+		return nil
+	}
+
+	out := make(map[string]string, len(values))
+	for key, value := range values {
+		switch v := value.(type) {
+		case string:
+			out[key] = v
+		default:
+			out[key] = fmt.Sprint(v)
+		}
+	}
+	return out
+}

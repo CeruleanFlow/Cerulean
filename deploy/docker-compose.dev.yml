@@ -1,6 +1,23 @@
 services:
+  mysql:
+    image: mysql:8.4
+    container_name: cerulean-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: cerulean
+      MYSQL_USER: cerulean
+      MYSQL_PASSWORD: cerulean
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+
   minio:
     image: minio/minio:latest
+    container_name: cerulean-minio
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: minioadmin
@@ -11,19 +28,9 @@ services:
     volumes:
       - minio_data:/data
 
-  postgres:
-    image: postgres:16-alpine
-    environment:
-      POSTGRES_USER: cerulean
-      POSTGRES_PASSWORD: cerulean
-      POSTGRES_DB: cerulean
-    ports:
-      - "5432:5432"
-    volumes:
-      - pg_data:/var/lib/postgresql/data
-
   elasticsearch:
     image: docker.elastic.co/elasticsearch/elasticsearch:8.15.3
+    container_name: cerulean-elasticsearch
     environment:
       discovery.type: single-node
       xpack.security.enabled: "false"
@@ -35,10 +42,11 @@ services:
 
   redis:
     image: redis:7-alpine
+    container_name: cerulean-redis
     ports:
       - "6379:6379"
 
 volumes:
+  mysql_data:
   minio_data:
-  pg_data:
   es_data:

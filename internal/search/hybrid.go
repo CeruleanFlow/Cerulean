@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 
-	"github.com/CeruleanFlow/cerulean-server/internal/domain"
+	"github.com/CeruleanFlow/cerulean/internal/domain"
 )
 
 type HybridBackend struct {

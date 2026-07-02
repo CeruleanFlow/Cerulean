@@ -4,9 +4,9 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/CeruleanFlow/cerulean-server/internal/domain"
-	"github.com/CeruleanFlow/cerulean-server/internal/repository"
-	"github.com/CeruleanFlow/cerulean-server/internal/search"
+	"github.com/CeruleanFlow/cerulean/internal/domain"
+	"github.com/CeruleanFlow/cerulean/internal/repository"
+	"github.com/CeruleanFlow/cerulean/internal/search"
 )
 
 type Service struct {
@@ -51,6 +51,7 @@ func toSources(results []search.Result) []domain.Source {
 			PageNo:  result.PageNo,
 			Text:    result.Text,
 			Score:   result.Score,
+			Backend: result.Backend,
 		})
 	}
 	return sources

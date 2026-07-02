@@ -22,6 +22,7 @@ type Paper struct {
 	ObjectKey   string      `json:"object_key"`
 	Status      PaperStatus `json:"status"`
 	PageCount   int         `json:"page_count"`
+	Error       string      `json:"error,omitempty"`
 	CreatedAt   time.Time   `json:"created_at"`
 	UpdatedAt   time.Time   `json:"updated_at"`
 }
@@ -35,6 +36,8 @@ type Chunk struct {
 	ObjectKey string            `json:"object_key,omitempty"`
 	VectorID  string            `json:"vector_id,omitempty"`
 	Metadata  map[string]string `json:"metadata,omitempty"`
+	CreatedAt time.Time         `json:"created_at"`
+	UpdatedAt time.Time         `json:"updated_at"`
 }
 
 type Source struct {
@@ -43,6 +46,7 @@ type Source struct {
 	PageNo  int     `json:"page_no"`
 	Text    string  `json:"text"`
 	Score   float64 `json:"score"`
+	Backend string  `json:"backend,omitempty"`
 }
 
 type SearchRequest struct {
