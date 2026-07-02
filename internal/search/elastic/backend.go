@@ -3,8 +3,8 @@ package elastic
 import (
 	"context"
 
-	"github.com/CeruleanFlow/cerulean-server/internal/domain"
-	"github.com/CeruleanFlow/cerulean-server/internal/search"
+	"github.com/CeruleanFlow/cerulean/internal/domain"
+	"github.com/CeruleanFlow/cerulean/internal/search"
 )
 
 // Backend is a placeholder for Elasticsearch/BM25 retrieval.

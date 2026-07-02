@@ -3,8 +3,8 @@ package amaranth
 import (
 	"context"
 
-	"github.com/CeruleanFlow/cerulean-server/internal/domain"
-	"github.com/CeruleanFlow/cerulean-server/internal/search"
+	"github.com/CeruleanFlow/cerulean/internal/domain"
+	"github.com/CeruleanFlow/cerulean/internal/search"
 )
 
 // Backend is the future HTTP/gRPC client for the C++ Amaranth vector engine.

@@ -1,72 +1,85 @@
 # Cerulean Server
 
-Cerulean Server is the Go backend for **Cerulean**, a paper-oriented RAG system for graduate students and researchers.
+Go backend for Cerulean, a paper-oriented RAG system for research reading, paper retrieval, source tracing, and citation-aware writing assistance.
 
-The project is intentionally initialized as a clean, dependency-light skeleton. The default build uses only the Go standard library so the architecture can compile immediately. Real adapters for MinIO, Elasticsearch, PaddleOCR workers, and Amaranth can be added behind the existing interfaces.
+This checkpoint focuses on the first real development loop:
 
-## Target Architecture
+1. upload a PDF;
+2. calculate SHA256 and de-duplicate;
+3. store the original paper artifact;
+4. persist paper/chunk metadata;
+5. create an ingest task;
+6. generate placeholder chunks;
+7. search real stored chunks through a local lexical backend.
 
-```text
-PDF Upload
-  -> Object Storage: MinIO / local fallback
-  -> Ingest Task: PaddleOCR / PDF text parser
-  -> Chunking
-  -> Lexical Index: Elasticsearch
-  -> Vector Index: Amaranth
-  -> Hybrid Retrieval: RRF
-  -> RAG Answer + page-level sources
-```
-
-## Current MVP Endpoints
-
-| Method | Path | Description |
-|---|---|---|
-| GET | `/api/v1/health` | health check |
-| POST | `/api/v1/papers` | upload paper PDF as `file` multipart field |
-| GET | `/api/v1/papers` | list papers |
-| GET | `/api/v1/papers/{id}` | get paper detail |
-| POST | `/api/v1/papers/{id}/ingest` | start a mock ingest task |
-| POST | `/api/v1/search` | hybrid search placeholder |
-| POST | `/api/v1/chat` | RAG answer placeholder |
+The placeholder ingest stage is intentionally simple. Its job is to keep the API, database, and UI workflow stable before PaddleOCR, AstraFlow embeddings/rerank, Elasticsearch, Amaranth, and DeepSeek are wired.
 
 ## Run
 
 ```bash
+cp .env.example .env
+# optional: source .env manually or use your shell/IDE env loader
 go run ./cmd/server
 ```
 
-Upload a file:
-
-```bash
-curl -F "file=@paper.pdf" http://localhost:8080/api/v1/papers
-```
-
-Search:
-
-```bash
-curl -X POST http://localhost:8080/api/v1/search \
-  -H 'Content-Type: application/json' \
-  -d '{"query":"what is the main contribution?","top_k":5}'
-```
-
-## Project Layout
+The dependency-free defaults are:
 
 ```text
-cmd/server              main entry
-internal/api            HTTP router and handlers
-internal/domain         core domain types
-internal/storage        object storage interface and local fallback
-internal/ingest         document parsing / OCR pipeline interfaces
-internal/search         search backend interfaces and hybrid retrieval
-internal/rag            RAG service
-internal/repository     metadata repository
-internal/task           in-memory task manager for MVP
+CERULEAN_DB_DRIVER=json
+CERULEAN_DB_PATH=.var/cerulean.json
+CERULEAN_STORAGE_DRIVER=local
+CERULEAN_LOCAL_STORAGE_DIR=.var/objects
+CERULEAN_SEARCH_DRIVER=local
 ```
 
-## Next Steps
+## API
 
-1. Replace `LocalObjectStorage` with a real MinIO implementation using `minio-go`.
-2. Add a PaddleOCR Python worker and task queue.
-3. Index chunks into Elasticsearch and Amaranth.
-4. Implement OCR JSON -> Markdown -> chunk conversion.
-5. Add source highlighting with page number and bbox.
+```bash
+# health
+curl http://localhost:8080/api/v1/health
+
+# upload a PDF
+curl -F "file=@paper.pdf" http://localhost:8080/api/v1/papers
+
+# list papers
+curl http://localhost:8080/api/v1/papers
+
+# get one paper
+curl http://localhost:8080/api/v1/papers/{paper_id}
+
+# download original PDF
+curl -L http://localhost:8080/api/v1/papers/{paper_id}/download -o paper.pdf
+
+# start placeholder ingestion
+curl -X POST http://localhost:8080/api/v1/papers/{paper_id}/ingest
+
+# inspect generated chunks
+curl http://localhost:8080/api/v1/papers/{paper_id}/chunks
+
+# search chunks
+curl -X POST http://localhost:8080/api/v1/search \
+  -H "Content-Type: application/json" \
+  -d '{"query":"PaddleOCR embedding Amaranth", "top_k": 5}'
+
+# chat placeholder answer with sources
+curl -X POST http://localhost:8080/api/v1/chat \
+  -H "Content-Type: application/json" \
+  -d '{"question":"what is the current pipeline?", "top_k": 5}'
+```
+
+## Project direction
+
+Cerulean will evolve into:
+
+```text
+PDF upload
+  -> MinIO artifact storage
+  -> PaddleOCR parsing/layout JSON/page images
+  -> page-aware chunks
+  -> AstraFlow embedding
+  -> Amaranth vector indexing
+  -> Elasticsearch BM25 indexing
+  -> AstraFlow reranking
+  -> DeepSeek answer generation
+  -> source/citation aware paper reading UI
+```
