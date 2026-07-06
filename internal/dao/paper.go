@@ -43,9 +43,6 @@ func (d *PaperDAO) Update(ctx context.Context, paper domain.Paper) error {
 	}
 
 	model := toPaperEntity(paper)
-	if model.UserID == "" {
-		model.UserID = DefaultUserID
-	}
 
 	return d.db.WithContext(ctx).Save(&model).Error
 }
@@ -53,7 +50,11 @@ func (d *PaperDAO) Update(ctx context.Context, paper domain.Paper) error {
 func (d *PaperDAO) Get(ctx context.Context, id string) (domain.Paper, error) {
 	var model entity.Paper
 
-	if err := d.db.WithContext(ctx).First(&model, "id = ?", id).Error; err != nil {
+	err := d.db.WithContext(ctx).
+		First(&model, "id = ?", id).
+		Error
+
+	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return domain.Paper{}, repository.ErrNotFound
 		}
@@ -66,7 +67,11 @@ func (d *PaperDAO) Get(ctx context.Context, id string) (domain.Paper, error) {
 func (d *PaperDAO) FindBySHA256(ctx context.Context, sha256 string) (domain.Paper, error) {
 	var model entity.Paper
 
-	if err := d.db.WithContext(ctx).First(&model, "sha256 = ?", sha256).Error; err != nil {
+	err := d.db.WithContext(ctx).
+		First(&model, "sha256 = ?", sha256).
+		Error
+
+	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return domain.Paper{}, repository.ErrNotFound
 		}

@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"io"
+	"strings"
 	"time"
 )
 
@@ -11,16 +12,29 @@ type PutOptions struct {
 	Metadata    map[string]string
 }
 
+type PutResult struct {
+	Key  string
+	ETag string
+	Size int64
+}
+
 type ObjectInfo struct {
-	Key         string            `json:"key"`
-	Size        int64             `json:"size"`
-	ContentType string            `json:"content_type"`
-	Metadata    map[string]string `json:"metadata,omitempty"`
+	Key          string
+	Size         int64
+	ContentType  string
+	ETag         string
+	LastModified time.Time
 }
 
 type ObjectStorage interface {
-	Put(ctx context.Context, key string, r io.Reader, size int64, opts PutOptions) (ObjectInfo, error)
+	Put(ctx context.Context, key string, reader io.Reader, size int64, opts PutOptions) (PutResult, error)
 	Get(ctx context.Context, key string) (io.ReadCloser, ObjectInfo, error)
 	Delete(ctx context.Context, key string) error
 	PresignedGet(ctx context.Context, key string, expire time.Duration) (string, error)
+}
+
+func normalizeObjectKey(key string) string {
+	key = strings.TrimSpace(key)
+	key = strings.TrimPrefix(key, "/")
+	return key
 }
