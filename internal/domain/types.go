@@ -50,14 +50,24 @@ type Source struct {
 }
 
 type SearchRequest struct {
-	Query   string            `json:"query"`
-	TopK    int               `json:"top_k"`
-	Filters map[string]string `json:"filters,omitempty"`
+	Query   string `json:"query"`
+	TopK    int    `json:"top_k"`
+	PaperID string `json:"paper_id,omitempty"`
 }
 
 type SearchResponse struct {
-	Query   string   `json:"query"`
-	Results []Source `json:"results"`
+	Query   string         `json:"query"`
+	Results []SearchResult `json:"results"`
+}
+
+type SearchResult struct {
+	ChunkID    string  `json:"chunk_id"`
+	PaperID    string  `json:"paper_id"`
+	PageNo     int     `json:"page_no"`
+	ChunkIndex int     `json:"chunk_index"`
+	Text       string  `json:"text"`
+	Score      float64 `json:"score"`
+	Backend    string  `json:"backend"`
 }
 
 type ChatRequest struct {

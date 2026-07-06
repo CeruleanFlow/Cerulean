@@ -1,9 +1,10 @@
 package api
 
 import (
-	"github.com/CeruleanFlow/cerulean/internal/dao"
 	"net/http"
 	"strings"
+
+	"github.com/CeruleanFlow/cerulean/internal/dao"
 
 	"github.com/CeruleanFlow/cerulean/internal/config"
 	"github.com/CeruleanFlow/cerulean/internal/ingest"
@@ -50,7 +51,7 @@ func NewRouter(opts RouterOptions) http.Handler {
 		v1.GET("/tasks/:id", h.GetTask)
 
 		v1.POST("/search", h.Search)
-		v1.POST("/chat", h.Chat)
+		//v1.POST("/chat", h.Chat)
 	}
 
 	return router

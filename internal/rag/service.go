@@ -2,7 +2,6 @@ package rag
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/CeruleanFlow/cerulean/internal/domain"
 	"github.com/CeruleanFlow/cerulean/internal/repository"
@@ -10,37 +9,41 @@ import (
 )
 
 type Service struct {
-	papers  repository.PaperRepository
-	backend search.Backend
+	papers repository.PaperRepository
+	search search.Backend
 }
 
-func NewService(papers repository.PaperRepository, backend search.Backend) *Service {
-	return &Service{papers: papers, backend: backend}
+func NewService(papers repository.PaperRepository, searchBackend search.Backend) *Service {
+	return &Service{papers: papers, search: searchBackend}
 }
 
 func (s *Service) Search(ctx context.Context, req domain.SearchRequest) (domain.SearchResponse, error) {
+	if s.search == nil {
+		return domain.SearchResponse{
+			Query:   req.Query,
+			Results: []domain.SearchResult{},
+		}, nil
+	}
+
 	if req.TopK <= 0 {
-		req.TopK = 5
+		req.TopK = 10
 	}
-	results, err := s.backend.Search(ctx, search.Query{Text: req.Query, TopK: req.TopK, Filters: req.Filters})
-	if err != nil {
-		return domain.SearchResponse{}, err
-	}
-	return domain.SearchResponse{Query: req.Query, Results: toSources(results)}, nil
+
+	return s.search.Search(ctx, req)
 }
 
-func (s *Service) Chat(ctx context.Context, req domain.ChatRequest) (domain.ChatResponse, error) {
-	if req.TopK <= 0 {
-		req.TopK = 5
-	}
-	results, err := s.backend.Search(ctx, search.Query{Text: req.Question, TopK: req.TopK, Filters: req.Filters})
-	if err != nil {
-		return domain.ChatResponse{}, err
-	}
-	sources := toSources(results)
-	answer := fmt.Sprintf("MVP mock answer for: %q. Wire LLM completion after retrieval is ready.", req.Question)
-	return domain.ChatResponse{Answer: answer, Sources: sources}, nil
-}
+//func (s *Service) Chat(ctx context.Context, req domain.ChatRequest) (domain.ChatResponse, error) {
+//	if req.TopK <= 0 {
+//		req.TopK = 5
+//	}
+//	results, err := s.search.Search(ctx, req)
+//	if err != nil {
+//		return domain.ChatResponse{}, err
+//	}
+//	sources := toSources(results)
+//	answer := fmt.Sprintf("MVP mock answer for: %q. Wire LLM completion after retrieval is ready.", req.Question)
+//	return domain.ChatResponse{Answer: answer, Sources: sources}, nil
+//}
 
 func toSources(results []search.Result) []domain.Source {
 	sources := make([]domain.Source, 0, len(results))

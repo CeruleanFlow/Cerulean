@@ -288,21 +288,21 @@ func (h *Handler) Search(c *gin.Context) {
 	c.JSON(http.StatusOK, resp)
 }
 
-func (h *Handler) Chat(c *gin.Context) {
-	var req domain.ChatRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		writeError(c, http.StatusBadRequest, err)
-		return
-	}
-
-	resp, err := h.rag.Chat(c.Request.Context(), req)
-	if err != nil {
-		writeError(c, http.StatusInternalServerError, err)
-		return
-	}
-
-	c.JSON(http.StatusOK, resp)
-}
+//func (h *Handler) Chat(c *gin.Context) {
+//	var req domain.ChatRequest
+//	if err := c.ShouldBindJSON(&req); err != nil {
+//		writeError(c, http.StatusBadRequest, err)
+//		return
+//	}
+//
+//	resp, err := h.rag.Chat(c.Request.Context(), req)
+//	if err != nil {
+//		writeError(c, http.StatusInternalServerError, err)
+//		return
+//	}
+//
+//	c.JSON(http.StatusOK, resp)
+//}
 
 func writeError(c *gin.Context, status int, err error) {
 	c.JSON(status, gin.H{
