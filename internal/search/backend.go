@@ -25,8 +25,9 @@ type Result struct {
 
 type Backend interface {
 	Name() string
-	Index(ctx context.Context, chunks []domain.Chunk) error
-	Search(ctx context.Context, query Query) ([]Result, error)
+	EnsureIndex(ctx context.Context) error
+	IndexChunks(ctx context.Context, chunks []domain.Chunk) error
+	Search(ctx context.Context, req domain.SearchRequest) (domain.SearchResponse, error)
 	DeleteByPaperID(ctx context.Context, paperID string) error
 }
 

@@ -28,6 +28,8 @@ type Config struct {
 	SearchDriver       string
 	ElasticURL         string
 	ElasticIndex       string
+	ElasticUsername    string
+	ElasticPassword    string
 	AmaranthURL        string
 	AmaranthCollection string
 
@@ -61,6 +63,8 @@ func Load() Config {
 		SearchDriver:       env("CERULEAN_SEARCH_DRIVER", "local"),
 		ElasticURL:         env("CERULEAN_ELASTIC_URL", "http://127.0.0.1:9200"),
 		ElasticIndex:       env("CERULEAN_ELASTIC_INDEX", "cerulean_chunks"),
+		ElasticUsername:    env("CERULEAN_ELASTIC_USERNAME", ""),
+		ElasticPassword:    env("CERULEAN_ELASTIC_PASSWORD", ""),
 		AmaranthURL:        env("CERULEAN_AMARANTH_URL", "http://127.0.0.1:9090"),
 		AmaranthCollection: env("CERULEAN_AMARANTH_COLLECTION", "papers"),
 

@@ -22,8 +22,14 @@ type Service struct {
 	tasks  task.Manager
 }
 
-func NewService(papers repository.PaperRepository, chunks repository.ChunkRepository, store storage.ObjectStorage, searchBackend search.Backend, tasks task.Manager) *Service {
-	return &Service{papers: papers, chunks: chunks, store: store, search: searchBackend, tasks: tasks}
+func NewService(papers repository.PaperRepository, chunks repository.ChunkRepository, store storage.ObjectStorage, tasks task.Manager, searchBackend search.Backend) *Service {
+	return &Service{
+		papers: papers,
+		chunks: chunks,
+		tasks:  tasks,
+		store:  store,
+		search: searchBackend,
+	}
 }
 
 func (s *Service) StartPaperIngest(ctx context.Context, paperID string) (task.Task, error) {
@@ -57,7 +63,7 @@ func (s *Service) StartPaperIngest(ctx context.Context, paperID string) (task.Ta
 	return job, nil
 }
 
-func (s *Service) runPlaceholderIngest(ctx context.Context, job task.Task, paper domain.Paper) {
+func (s *Service) runPlaceholderIngest(ctx context.Context, job task.Task, paper domain.Paper) error {
 	now := time.Now()
 	job.Status = task.Running
 	job.Message = "building placeholder chunks"
@@ -68,22 +74,20 @@ func (s *Service) runPlaceholderIngest(ctx context.Context, job task.Task, paper
 	artifactKey := fmt.Sprintf("papers/%s/parsed/document.md", paper.ID)
 	if _, err := s.store.Put(ctx, artifactKey, bytes.NewReader([]byte(markdown)), int64(len(markdown)), storage.PutOptions{ContentType: "text/markdown; charset=utf-8"}); err != nil {
 		s.fail(ctx, job, paper, err)
-		return
+		return fmt.Errorf("store.Put: %w", err)
 	}
 
 	chunks := makePlaceholderChunks(paper, artifactKey)
 	if err := s.chunks.DeleteByPaperID(ctx, paper.ID); err != nil {
 		s.fail(ctx, job, paper, err)
-		return
+		return fmt.Errorf("s.chunks.DeleteByPaperID: %w", err)
 	}
 	if err := s.chunks.UpsertMany(ctx, chunks); err != nil {
-		s.fail(ctx, job, paper, err)
-		return
+		return fmt.Errorf("save chunks to mysql: %w", err)
 	}
 	if s.search != nil {
-		if err := s.search.Index(ctx, chunks); err != nil {
-			s.fail(ctx, job, paper, err)
-			return
+		if err := s.search.IndexChunks(ctx, chunks); err != nil {
+			return fmt.Errorf("index chunks to elasticsearch: %w", err)
 		}
 	}
 
@@ -97,6 +101,8 @@ func (s *Service) runPlaceholderIngest(ctx context.Context, job task.Task, paper
 	job.Message = "placeholder ingestion completed; next step is wiring PaddleOCR output into the same chunk path"
 	job.UpdatedAt = now
 	_ = s.tasks.Update(ctx, job)
+
+	return nil
 }
 
 func (s *Service) fail(ctx context.Context, job task.Task, paper domain.Paper, err error) {

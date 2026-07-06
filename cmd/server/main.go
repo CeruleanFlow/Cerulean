@@ -15,9 +15,6 @@ import (
 	"github.com/CeruleanFlow/cerulean/internal/rag"
 	"github.com/CeruleanFlow/cerulean/internal/repository"
 	"github.com/CeruleanFlow/cerulean/internal/search"
-	"github.com/CeruleanFlow/cerulean/internal/search/amaranth"
-	"github.com/CeruleanFlow/cerulean/internal/search/elastic"
-	"github.com/CeruleanFlow/cerulean/internal/search/local"
 	"github.com/CeruleanFlow/cerulean/internal/storage"
 	"github.com/CeruleanFlow/cerulean/internal/task"
 )
@@ -34,10 +31,9 @@ func main() {
 		log.Fatal(err)
 	}
 	taskManager := task.NewMemoryManager()
-	searchBackend := buildSearchBackend(cfg, chunkRepo)
-
-	ingestService := ingest.NewService(paperRepo, chunkRepo, objectStore, searchBackend, taskManager)
+	searchBackend, err := buildSearchBackend(cfg)
 	ragService := rag.NewService(paperRepo, searchBackend)
+	ingestService := ingest.NewService(paperRepo, chunkRepo, objectStore, taskManager, searchBackend)
 
 	router := api.NewRouter(api.RouterOptions{
 		Config:        cfg,
@@ -101,17 +97,27 @@ func buildObjectStorage(cfg config.Config) (storage.ObjectStorage, error) {
 	}
 }
 
-func buildSearchBackend(cfg config.Config, chunks repository.ChunkRepository) search.Backend {
-	localBackend := local.NewBackend(chunks)
+func buildSearchBackend(cfg config.Config) (search.Backend, error) {
 	switch strings.ToLower(cfg.SearchDriver) {
-	case "", "local":
-		return localBackend
-	case "hybrid":
-		elasticBackend := elastic.NewBackend(cfg.ElasticURL, cfg.ElasticIndex)
-		amaranthBackend := amaranth.NewBackend(cfg.AmaranthURL, cfg.AmaranthCollection)
-		return search.NewHybridBackend(elasticBackend, amaranthBackend, search.NewRRFusion(60))
+	//case "", "local":
+	//	return search.NewLocalBackend(), nil
+
+	case "elastic", "elasticsearch", "es":
+		backend, err := search.NewElasticBackend(context.Background(), search.ElasticConfig{
+			URL:      cfg.ElasticURL,
+			Index:    cfg.ElasticIndex,
+			Username: cfg.ElasticUsername,
+			Password: cfg.ElasticPassword,
+		})
+		if err != nil {
+			return nil, err
+		}
+		if backend == nil {
+			return nil, fmt.Errorf("elastic backend constructor returned nil")
+		}
+		return backend, nil
+
 	default:
-		log.Printf("unknown CERULEAN_SEARCH_DRIVER=%q; fallback to local", cfg.SearchDriver)
-		return localBackend
+		return nil, fmt.Errorf("unsupported CERULEAN_SEARCH_DRIVER=%q; supported: local, elastic", cfg.SearchDriver)
 	}
 }
