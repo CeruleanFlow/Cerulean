@@ -1,17 +1,19 @@
 package api
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"github.com/CeruleanFlow/cerulean/internal/dao"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/CeruleanFlow/cerulean/internal/dao"
 
 	"github.com/CeruleanFlow/cerulean/internal/domain"
 	"github.com/CeruleanFlow/cerulean/internal/ingest"
@@ -51,6 +53,7 @@ func (h *Handler) Health(c *gin.Context) {
 	})
 }
 
+// UploadPaper upload a new paper
 func (h *Handler) UploadPaper(c *gin.Context) {
 	header, err := c.FormFile("file")
 	if err != nil {
@@ -101,10 +104,16 @@ func (h *Handler) UploadPaper(c *gin.Context) {
 
 	digest := hex.EncodeToString(hasher.Sum(nil))
 
-	if existing, err := h.papers.FindBySHA256(c.Request.Context(), digest); err == nil {
+	opCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	existing, err := h.papers.FindBySHA256(opCtx, digest)
+	if err == nil {
 		c.JSON(http.StatusOK, existing)
 		return
-	} else if !errors.Is(err, repository.ErrNotFound) {
+	}
+
+	if !errors.Is(err, repository.ErrNotFound) {
 		writeError(c, http.StatusInternalServerError, err)
 		return
 	}
@@ -123,7 +132,7 @@ func (h *Handler) UploadPaper(c *gin.Context) {
 	}
 
 	_, err = h.store.Put(
-		c.Request.Context(),
+		opCtx,
 		objectKey,
 		tmp,
 		size,
@@ -154,7 +163,7 @@ func (h *Handler) UploadPaper(c *gin.Context) {
 		UpdatedAt:   now,
 	}
 
-	if err := h.papers.Create(c.Request.Context(), paper); err != nil {
+	if err := h.papers.Create(opCtx, paper); err != nil {
 		writeError(c, http.StatusInternalServerError, err)
 		return
 	}

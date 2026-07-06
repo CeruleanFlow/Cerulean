@@ -1,11 +1,13 @@
 package main
 
 import (
+	"context"
 	"fmt"
-	"github.com/CeruleanFlow/cerulean/internal/dao"
 	"log"
 	"net/http"
 	"strings"
+
+	"github.com/CeruleanFlow/cerulean/internal/dao"
 
 	"github.com/CeruleanFlow/cerulean/internal/api"
 	"github.com/CeruleanFlow/cerulean/internal/config"
@@ -82,11 +84,20 @@ func buildRepositories(cfg config.Config) (repository.PaperRepository, repositor
 func buildObjectStorage(cfg config.Config) (storage.ObjectStorage, error) {
 	switch strings.ToLower(cfg.StorageDriver) {
 	case "", "local":
-		return storage.NewLocalObjectStorage(cfg.LocalStorageDir), nil
+		return storage.NewLocalObjectStorage(cfg.LocalStorageDir)
+
 	case "minio":
-		return nil, fmt.Errorf("minio storage is the next adapter to wire; use CERULEAN_STORAGE_DRIVER=local for this dependency-free checkpoint")
+		useSSL := strings.EqualFold(cfg.MinIOUseSSL, "true")
+		return storage.NewMinIOObjectStorage(context.Background(), storage.MinIOConfig{
+			Endpoint:  cfg.MinIOEndpoint,
+			AccessKey: cfg.MinIOAccessKey,
+			SecretKey: cfg.MinIOSecretKey,
+			Bucket:    cfg.MinIOBucket,
+			UseSSL:    useSSL,
+		})
+
 	default:
-		return nil, fmt.Errorf("unsupported CERULEAN_STORAGE_DRIVER=%q; supported: local", cfg.StorageDriver)
+		return nil, fmt.Errorf("unsupported CERULEAN_STORAGE_DRIVER=%q; supported: local, minio", cfg.StorageDriver)
 	}
 }
 

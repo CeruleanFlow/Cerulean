@@ -15,70 +15,100 @@ type LocalObjectStorage struct {
 	root string
 }
 
-func NewLocalObjectStorage(root string) *LocalObjectStorage {
-	return &LocalObjectStorage{root: root}
+func NewLocalObjectStorage(root string) (*LocalObjectStorage, error) {
+	if root == "" {
+		root = ".var/objects"
+	}
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		return nil, err
+	}
+	return &LocalObjectStorage{root: root}, nil
 }
 
-func (s *LocalObjectStorage) Put(ctx context.Context, key string, r io.Reader, size int64, opts PutOptions) (ObjectInfo, error) {
+func (s *LocalObjectStorage) Put(ctx context.Context, key string, reader io.Reader, size int64, opts PutOptions) (PutResult, error) {
 	_ = ctx
-	path, err := s.safePath(key)
-	if err != nil {
-		return ObjectInfo{}, err
-	}
+	_ = opts
+
+	key = normalizeObjectKey(key)
+	path := s.pathFor(key)
+
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return ObjectInfo{}, err
+		return PutResult{}, err
 	}
+
 	file, err := os.Create(path)
 	if err != nil {
-		return ObjectInfo{}, err
+		return PutResult{}, err
 	}
 	defer file.Close()
-	written, err := io.Copy(file, r)
+
+	written, err := io.Copy(file, reader)
 	if err != nil {
-		return ObjectInfo{}, err
+		return PutResult{}, err
 	}
-	return ObjectInfo{Key: key, Size: written, ContentType: opts.ContentType, Metadata: opts.Metadata}, nil
+
+	return PutResult{
+		Key:  key,
+		Size: written,
+	}, nil
 }
 
 func (s *LocalObjectStorage) Get(ctx context.Context, key string) (io.ReadCloser, ObjectInfo, error) {
 	_ = ctx
-	path, err := s.safePath(key)
-	if err != nil {
-		return nil, ObjectInfo{}, err
-	}
+
+	key = normalizeObjectKey(key)
+	path := s.pathFor(key)
+
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, ObjectInfo{}, err
 	}
+
 	stat, err := file.Stat()
 	if err != nil {
 		_ = file.Close()
 		return nil, ObjectInfo{}, err
 	}
-	return file, ObjectInfo{Key: key, Size: stat.Size()}, nil
+
+	return file, ObjectInfo{
+		Key:          key,
+		Size:         stat.Size(),
+		LastModified: stat.ModTime(),
+	}, nil
 }
 
 func (s *LocalObjectStorage) Delete(ctx context.Context, key string) error {
 	_ = ctx
-	path, err := s.safePath(key)
-	if err != nil {
+
+	key = normalizeObjectKey(key)
+	path := s.pathFor(key)
+
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		return err
 	}
-	return os.Remove(path)
+
+	return nil
 }
 
 func (s *LocalObjectStorage) PresignedGet(ctx context.Context, key string, expire time.Duration) (string, error) {
 	_ = ctx
-	values := url.Values{}
-	values.Set("key", key)
-	values.Set("expire", expire.String())
-	return "/api/v1/objects/local?" + values.Encode(), nil
+	_ = expire
+
+	key = normalizeObjectKey(key)
+
+	return "file://" + url.PathEscape(key), nil
 }
 
-func (s *LocalObjectStorage) safePath(key string) (string, error) {
-	clean := filepath.Clean(key)
-	if strings.HasPrefix(clean, "..") || filepath.IsAbs(clean) {
-		return "", fmt.Errorf("unsafe object key: %s", key)
+func (s *LocalObjectStorage) pathFor(key string) string {
+	clean := filepath.Clean(strings.TrimPrefix(key, "/"))
+	return filepath.Join(s.root, clean)
+}
+
+var _ ObjectStorage = (*LocalObjectStorage)(nil)
+
+func checkLocalObjectStorage(root string) error {
+	if root == "" {
+		return fmt.Errorf("local storage root is empty")
 	}
-	return filepath.Join(s.root, clean), nil
+	return nil
 }
