@@ -17,6 +17,8 @@ import (
 	"github.com/CeruleanFlow/cerulean/internal/search"
 	"github.com/CeruleanFlow/cerulean/internal/storage"
 	"github.com/CeruleanFlow/cerulean/internal/task"
+
+	docparser "github.com/CeruleanFlow/cerulean/internal/parser"
 )
 
 func main() {
@@ -31,9 +33,10 @@ func main() {
 		log.Fatal(err)
 	}
 	taskManager := task.NewMemoryManager()
+	documentParser := docparser.NewPDFTextParser()
 	searchBackend, err := buildSearchBackend(cfg)
 	ragService := rag.NewService(paperRepo, searchBackend)
-	ingestService := ingest.NewService(paperRepo, chunkRepo, objectStore, taskManager, searchBackend)
+	ingestService := ingest.NewService(paperRepo, chunkRepo, objectStore, taskManager, searchBackend, documentParser)
 
 	router := api.NewRouter(api.RouterOptions{
 		Config:        cfg,

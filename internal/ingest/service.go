@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
+	"os"
 	"strings"
 	"time"
 
@@ -12,6 +14,8 @@ import (
 	"github.com/CeruleanFlow/cerulean/internal/search"
 	"github.com/CeruleanFlow/cerulean/internal/storage"
 	"github.com/CeruleanFlow/cerulean/internal/task"
+
+	docparser "github.com/CeruleanFlow/cerulean/internal/parser"
 )
 
 type Service struct {
@@ -20,15 +24,24 @@ type Service struct {
 	store  storage.ObjectStorage
 	search search.Backend
 	tasks  task.Manager
+	parser docparser.Parser
 }
 
-func NewService(papers repository.PaperRepository, chunks repository.ChunkRepository, store storage.ObjectStorage, tasks task.Manager, searchBackend search.Backend) *Service {
+func NewService(
+	papers repository.PaperRepository,
+	chunks repository.ChunkRepository,
+	store storage.ObjectStorage,
+	tasks task.Manager,
+	searchBackend search.Backend,
+	parser docparser.Parser,
+) *Service {
 	return &Service{
 		papers: papers,
 		chunks: chunks,
-		tasks:  tasks,
 		store:  store,
+		tasks:  tasks,
 		search: searchBackend,
+		parser: parser,
 	}
 }
 
@@ -37,119 +50,210 @@ func (s *Service) StartPaperIngest(ctx context.Context, paperID string) (task.Ta
 	if err != nil {
 		return task.Task{}, err
 	}
+
+	optCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
 	now := time.Now()
 	job := task.Task{
 		ID:        fmt.Sprintf("task_%d", now.UnixNano()),
 		PaperID:   paperID,
 		Type:      "paper_ingest",
 		Status:    task.Queued,
-		Message:   "queued local placeholder ingestion; PaddleOCR worker will replace this stage",
+		Message:   "queued PDF text ingestion; PaddleOCR will be used later for scanned PDFs",
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
 	paper.Status = domain.PaperProcessing
 	paper.Error = ""
 	paper.UpdatedAt = now
-	if err := s.papers.Update(ctx, paper); err != nil {
+
+	if err := s.papers.Update(optCtx, paper); err != nil {
 		return task.Task{}, err
 	}
-	if err := s.tasks.Create(ctx, job); err != nil {
+	if err := s.tasks.Create(optCtx, job); err != nil {
 		return task.Task{}, err
 	}
 
 	// Keep this asynchronous so the public API shape is already compatible with
 	// the future PaddleOCR worker and queue based pipeline.
-	go s.runPlaceholderIngest(context.Background(), job, paper)
+	go func(job task.Task, paper domain.Paper) {
+		defer func() {
+			if r := recover(); r != nil {
+				s.fail(context.Background(), job, paper, fmt.Errorf("panic during paper ingest: %v", r))
+			}
+		}()
+
+		taskCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		defer cancel()
+
+		if err := s.runPDFTextIngest(taskCtx, job, paper); err != nil {
+			s.fail(context.Background(), job, paper, err)
+		}
+	}(job, paper)
 	return job, nil
 }
 
-func (s *Service) runPlaceholderIngest(ctx context.Context, job task.Task, paper domain.Paper) error {
+func (s *Service) runPDFTextIngest(ctx context.Context, job task.Task, paper domain.Paper) error {
+	// precheck
+	if s.parser == nil {
+		return fmt.Errorf("document parser is not initialized")
+	}
+
 	now := time.Now()
 	job.Status = task.Running
-	job.Message = "building placeholder chunks"
+	job.Message = "parsing PDF text"
 	job.UpdatedAt = now
 	_ = s.tasks.Update(ctx, job)
 
-	markdown := placeholderMarkdown(paper)
-	artifactKey := fmt.Sprintf("papers/%s/parsed/document.md", paper.ID)
-	if _, err := s.store.Put(ctx, artifactKey, bytes.NewReader([]byte(markdown)), int64(len(markdown)), storage.PutOptions{ContentType: "text/markdown; charset=utf-8"}); err != nil {
-		s.fail(ctx, job, paper, err)
-		return fmt.Errorf("store.Put: %w", err)
+	// download the file to local
+	pdfPath, cleanup, err := s.downloadOriginalPDF(ctx, paper)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
+	// parse the file
+	doc, err := s.parser.ParseFile(ctx, pdfPath)
+	if err != nil {
+		return fmt.Errorf("parse pdf text: %w", err)
 	}
 
-	chunks := makePlaceholderChunks(paper, artifactKey)
-	if err := s.chunks.DeleteByPaperID(ctx, paper.ID); err != nil {
-		s.fail(ctx, job, paper, err)
-		return fmt.Errorf("s.chunks.DeleteByPaperID: %w", err)
+	// generate the markdown
+	markdown := parsedMarkdown(paper, doc)
+	artifactKey := fmt.Sprintf("papers/%s/parsed/document.md", paper.ID)
+
+	// save the markdown to MinIO
+	if _, err := s.store.Put(
+		ctx,
+		artifactKey,
+		bytes.NewReader([]byte(markdown)),
+		int64(len(markdown)),
+		storage.PutOptions{ContentType: "text/markdown; charset=utf-8"},
+	); err != nil {
+		return fmt.Errorf("store parsed markdown: %w", err)
 	}
+
+	// generate the chunk
+	chunks := docparser.BuildChunks(paper, artifactKey, doc, 1200, 150)
+	if len(chunks) == 0 {
+		return fmt.Errorf("pdf text parser produced no chunks")
+	}
+
+	// delete old chunks in mysql
+	if err := s.chunks.DeleteByPaperID(ctx, paper.ID); err != nil {
+		return fmt.Errorf("delete old chunks from mysql: %w", err)
+	}
+	// delete old chunk index in es
+	if s.search != nil {
+		if err := s.search.DeleteByPaperID(ctx, paper.ID); err != nil {
+			return fmt.Errorf("delete old chunks from elasticsearch: %w", err)
+		}
+	}
+	// save new chunks in mysql
 	if err := s.chunks.UpsertMany(ctx, chunks); err != nil {
 		return fmt.Errorf("save chunks to mysql: %w", err)
 	}
+	// save new chunks index in es
 	if s.search != nil {
 		if err := s.search.IndexChunks(ctx, chunks); err != nil {
 			return fmt.Errorf("index chunks to elasticsearch: %w", err)
 		}
 	}
 
+	// update paper / task status
 	now = time.Now()
+
 	paper.Status = domain.PaperParsed
-	paper.PageCount = 1
-	paper.Error = ""
 	paper.UpdatedAt = now
-	_ = s.papers.Update(ctx, paper)
+	paper.Error = ""
+	paper.PageCount = doc.PageCount
+
+	if err := s.papers.Update(ctx, paper); err != nil {
+		return fmt.Errorf("update paper status: %w", err)
+	}
+
 	job.Status = task.Succeeded
-	job.Message = "placeholder ingestion completed; next step is wiring PaddleOCR output into the same chunk path"
+	job.Message = fmt.Sprintf("PDF text ingestion completed: %d pages, %d chunks", doc.PageCount, len(chunks))
 	job.UpdatedAt = now
-	_ = s.tasks.Update(ctx, job)
+
+	if err := s.tasks.Update(ctx, job); err != nil {
+		return fmt.Errorf("update task status: %w", err)
+	}
 
 	return nil
 }
 
 func (s *Service) fail(ctx context.Context, job task.Task, paper domain.Paper, err error) {
+	opCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
 	now := time.Now()
+
 	paper.Status = domain.PaperFailed
 	paper.Error = err.Error()
 	paper.UpdatedAt = now
-	_ = s.papers.Update(ctx, paper)
+	_ = s.papers.Update(opCtx, paper)
+
 	job.Status = task.Failed
 	job.Message = err.Error()
 	job.UpdatedAt = now
-	_ = s.tasks.Update(ctx, job)
+	_ = s.tasks.Update(opCtx, job)
 }
 
-func placeholderMarkdown(paper domain.Paper) string {
-	return fmt.Sprintf("# %s\n\n"+
-		"This is a placeholder parsed document for **%s**.\n\n"+
-		"The current Cerulean pipeline has stored the original PDF object at `%s` and created searchable placeholder chunks. The next implementation step is to replace this placeholder with PaddleOCR output, page-level layout JSON, chunking, embedding, reranking, and hybrid retrieval.\n\n"+
-		"Suggested future metadata:\n\n"+
-		"- sha256: `%s`\n"+
-		"- content_type: `%s`\n"+
-		"- file_size: `%d`\n", paper.Title, paper.Filename, paper.ObjectKey, paper.SHA256, paper.ContentType, paper.Size)
+// downloadOriginalPDF download original PDF to tmp
+func (s *Service) downloadOriginalPDF(ctx context.Context, paper domain.Paper) (string, func(), error) {
+	if s.store == nil {
+		return "", nil, fmt.Errorf("object storage is not initialized")
+	}
+
+	if err := os.MkdirAll(".var/temp", 0755); err != nil {
+		return "", nil, fmt.Errorf("create tmp dir: %w", err)
+	}
+
+	reader, _, err := s.store.Get(ctx, paper.ObjectKey)
+	if err != nil {
+		return "", nil, fmt.Errorf("get original pdf from storage: %w", err)
+	}
+	defer reader.Close()
+
+	tmp, err := os.CreateTemp(".var/tmp", "ingest-*.pdf")
+	if err != nil {
+		return "", nil, fmt.Errorf("create ingest temp file: %w", err)
+	}
+
+	tmpPath := tmp.Name()
+	cleanup := func() {
+		_ = os.Remove(tmpPath)
+	}
+
+	if _, err := io.Copy(tmp, reader); err != nil {
+		_ = os.Remove(tmpPath)
+		cleanup()
+		return "", nil, fmt.Errorf("copy pdf to temp file: %w", err)
+	}
+
+	if err := tmp.Close(); err != nil {
+		cleanup()
+		return "", nil, fmt.Errorf("close temp file: %w", err)
+	}
+	return tmpPath, cleanup, nil
 }
 
-func makePlaceholderChunks(paper domain.Paper, artifactKey string) []domain.Chunk {
-	now := time.Now()
-	base := []string{
-		fmt.Sprintf("Paper title: %s. Original filename: %s. This paper has been uploaded into Cerulean and is ready for OCR parsing.", paper.Title, paper.Filename),
-		"Cerulean is a paper-oriented RAG system. The planned pipeline is PDF upload, MinIO artifact storage, PaddleOCR document parsing, chunking, AstraFlow embedding, Amaranth vector retrieval, Elasticsearch lexical retrieval, AstraFlow reranking, and DeepSeek answer generation.",
-		"This placeholder chunk exists so search and RAG screens can be tested before PaddleOCR is connected. After OCR is wired, this chunk will be replaced by page-aware content with page numbers, section labels, and citation information.",
+func parsedMarkdown(paper domain.Paper, doc docparser.Document) string {
+	var b strings.Builder
+
+	b.WriteString("# ")
+	b.WriteString(paper.Title)
+	b.WriteString("\n\n")
+
+	b.WriteString("<!-- Generated by Cerulean PDF text parser. -->\n\n")
+
+	for _, page := range doc.Pages {
+		b.WriteString(fmt.Sprintf("## Page %d\n\n", page.PageNo))
+		b.WriteString(strings.TrimSpace(page.Text))
+		b.WriteString("\n\n")
 	}
-	chunks := make([]domain.Chunk, 0, len(base))
-	for i, text := range base {
-		chunks = append(chunks, domain.Chunk{
-			ID:        fmt.Sprintf("%s_chunk_%03d", paper.ID, i+1),
-			PaperID:   paper.ID,
-			PageNo:    1,
-			Index:     i,
-			Text:      strings.TrimSpace(text),
-			ObjectKey: artifactKey,
-			Metadata: map[string]string{
-				"source": "placeholder_ingest",
-				"title":  paper.Title,
-			},
-			CreatedAt: now,
-			UpdatedAt: now,
-		})
-	}
-	return chunks
+
+	return b.String()
 }
